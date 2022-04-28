@@ -1,102 +1,57 @@
 import cv2
 import torch
-import torch.optim as optim
-import torch.nn.functional as F
-import torch.nn as nn
-import torchvision
 import numpy as np
 import argparse
-from dataset_hdf5 import DataSet_HDF5
-from SR_cygen_2 import SR_CyGen
+import yaml
 from os.path import join
 
-import random
-import time
 import datetime
-import os
+import time
+from shutil import copyfile
 from torch.utils.data import DataLoader
 
 import utils.utils as utils
 from skimage.metrics import structural_similarity as ssim_calc
 from skimage.metrics import peak_signal_noise_ratio as psnr_calc
-from math import log10
+
+from datasets.dataset_hdf5 import DataSet_HDF5
+from models.SR_cygen_3 import SR_CyGen
+from utils.utils import *
+from utils.logs import MessageLogger
 
 
-def is_hdf5_file(filename):
-    return any(filename.endswith(extension) for extension in [".hdf5"])
+parser = argparse.ArgumentParser(description="SR-CyGen Test")
 
-
-parser = argparse.ArgumentParser(description="SR-CyGen Train")
-
-parser.add_argument('--niters', type=int, default=1)
-parser.add_argument('--cmtype', type=str, default="jacnorm_x")
-parser.add_argument('--pxtype', type=str, default="nllhmarg")
-parser.add_argument('--w_cm', type=float, default=0.1)
-parser.add_argument('--w_px', type=float, default=1.)
-parser.add_argument('--n_mc_cm', type=int, default=1)
-parser.add_argument('--n_mc_px', type=int, default=1)
-parser.add_argument('--n_mc_eval', type=int, default=1)
-
-parser.add_argument('--batch_size', type=int, default=1)
-parser.add_argument('--test_batch_size', type=int, default=1)
-parser.add_argument('--lr', type=float, default=0.01)
-parser.add_argument('--dataset', default="C:/MyDocuments/Dataset_SR/testset", type=str, help='Path of the training dataset(.hdf5)')
 parser.add_argument('--gpu', type=int, default=0)
-parser.add_argument('--dim_z', type=int, default=128)
-parser.add_argument('--save_path', type=str, default="C:/MyCode/code for BS/SR-CyGen\expm")
-parser.add_argument('--model_path', type=str, default="C:/MyCode/code for BS/SR-CyGen/models/SR_CyGen_2_iter_073.pkl")
-parser.add_argument('--is_load_model', type=bool, default=True)
-parser.add_argument('--random_seed', type=int, default=99)
+parser.add_argument('--opt', type=str, default="options/test_SR_CyGen.yml")
 
 
-if __name__ == '__main__':
-    args = parser.parse_args()
-    args.cuda = torch.cuda.is_available() and args.gpu >= 0
-    device = torch.device('cuda:' + str(args.gpu) if args.gpu >= 0 and args.cuda else 'cpu')
-    torch.cuda.set_device(device)
-
-    args.save = args.save_path + "/expm-" + str(datetime.datetime.now())[0:19].replace(' ', '_').replace(':', '_')
-    utils.makedirs(args.save)
-    utils.makedirs(args.save + "/generate")
-    logger = utils.get_logger(args.save + "/logs")
-    logger.info(args)
-
-    # 加载模型
-    model = SR_CyGen(args).to(device)
-    # 设置optim
-    if args.is_load_model:
-        print("load Model：" + args.model_path)
-        model_checkpoint = torch.load(args.model_path, map_location=device)
-        model.load_state_dict(model_checkpoint['model'])
-        args.start_iters = model_checkpoint['epoch'] + 1
-        print("start epoch is:" + str(args.start_iters))
-
-    test_sets = [x for x in sorted(os.listdir(args.dataset)) if is_hdf5_file(x)]
-    print(test_sets)
-
-    psnr_meter = utils.RunningAverageMeter()
-    ssim_meter = utils.RunningAverageMeter()
-
+def test_pipeline(test_sets, model, test_recoder, logger, args, opt):
     model.eval()
+    test_recoder.reset()
+    save_img_n = 0
+    save_img_list = []
+
     for j in range(len(test_sets)):
-        # 读取第j个h5文件
-        print("Testing folder is {}".format(join(args.dataset, test_sets[j])))
-        test_set = DataSet_HDF5(join(args.dataset, test_sets[j]))
-        testloader = DataLoader(dataset=test_set, batch_size=args.batch_size, shuffle=False, num_workers=0)
-        print(len(testloader))
+        # get dataloader
+        test_set_path = join(opt['datasets']['dataroot'], test_sets[j])
+        test_set = DataSet_HDF5(test_set_path, use_hflip=False, use_vflip=False)
+        testloader = DataLoader(dataset=test_set, batch_size=opt['batch_size'], shuffle=False, num_workers=0)
 
-        psnr_meter.create()
-        ssim_meter.create()
-
+        test_recoder.create()  # create new recoder for this dataloader
         for k, (LR, SR) in enumerate(testloader):
+            # generate
+            start_time = time.time()
             LR = LR.to(device)
             SR = SR.to(device)
-
             with torch.no_grad():
-                # SR_pred = model.generate("gibbs", LR, LR_resize)
-                SR_pred = model.generate("gibbs", LR, 1, 1)
+                SR_pred = model.generate("gibbs", LR, opt['test']['generate_n_1'], opt['test']['generate_n_2'])
+            end_time = time.time()
 
-            for i in range(args.batch_size):
+            # calc psnr and ssim
+            psnr_avg, ssim_avg = 0.0, 0.0
+            n_img = LR.shape[0]
+            for i in range(n_img):
                 LR_index = LR[i:i + 1, :, :, :]
                 SR_index = SR[i:i + 1, :, :, :]
                 SR_pred_index = SR_pred[-1][i:i + 1, :, :, :]
@@ -105,41 +60,81 @@ if __name__ == '__main__':
                 SR_img = tensor2img(SR_index)
                 SR_pred_img = tensor2img(SR_pred_index)
 
-                psnr = psnr_calc(SR_pred_img, SR_img, data_range=255.0)
-                ssim = ssim_calc(SR_pred_img, SR_img, data_range=255.0, multichannel=True)
-                psnr_LR = psnr_calc(LR_img, SR_img, data_range=255.0)
-                ssim_LR = ssim_calc(LR_img, SR_img, data_range=255.0, multichannel=True)
-                psnr_meter.update(psnr)
-                ssim_meter.update(ssim)
-                result = np.concatenate((SR_img, SR_pred_img, LR_img), 1)
+                psnr, ssim = calc_psnr_ssim(SR_pred_img, SR_img)
+                psnr_avg += psnr
+                ssim_avg += ssim
+                log_message = ("Time {:.4f} | PSNR {:.4f} | SSIM {:.4f}".format(
+                    (end_time - start_time) / n_img, psnr, ssim))
+                logger.print_log(log_message)
+                # save images
+                if save_img_n < opt['test']['save_num']:
+                    # save img as : HR | SR | LR
+                    if opt['test']['save_type'] == "contrast":
+                        save_img = np.concatenate((SR_img, SR_pred_img, LR_img), 1)
+                    # save img as : SR[0] | SR[1] |...| SR[n1-1]
+                    elif opt['test']['save_type'] == "loop":
+                        img_list = []
+                        for l in range(len(SR_pred)):
+                            SR_pred_img = tensor2img(SR_pred[l])
+                            img_list.append(SR_pred_img)
+                        save_img = np.concatenate(img_list, 1)
+                    else:
+                        save_img = SR_pred_img
+                    cv2.imwrite(args.save + "/generate" + "/img_{:04d}.jpg".format(save_img_n), save_img)
+                    save_img_list.append(save_img)
+                    save_img_n += 1
+            # update recoder
+            test_recoder.update({'time': (end_time - start_time) / n_img,
+                                  'psnr': psnr_avg / n_img,
+                                  'ssim': ssim_avg / n_img}, n_img)
+        # print log message for this dataloader
+        log_msg_dict = test_recoder.get_avg_now()
+        log_message = ("Dataset {} | Time {:.4f} | PSNR {:.4f} | SSIM {:.4f}".format(
+            test_sets[j], log_msg_dict['time'], log_msg_dict['psnr'], log_msg_dict['ssim']))
+        logger.print_log(log_message)
 
-                # img_list = []
-                # for i in range(len(SR_pred)):
-                #     SR_pred_img = tensor2img(SR_pred[i])
-                #     psnr = psnr_calc(SR_pred_img, SR_img, data_range=255.0)
-                #     ssim = ssim_calc(SR_pred_img, SR_img, data_range=255.0, multichannel=True)
-                #     print(psnr, ssim)
-                #     img_list.append(tensor2img(SR_pred[i]))
-                # result = np.concatenate(img_list, 1)
-                #
-                # img_file = args.save + "/generate/{:04d}_{:02d}.jpg".format(k, i)
-                # cv2.imwrite(img_file, result)
-
-                log_message = ("img_file:{:04d}_{:02d}.jpg || PSNR:{:.4f}({:.4f}) || SSIM:{:.4f}({:.4f})"
-                               .format(k, i, psnr, psnr_LR, ssim, ssim_LR))
-                print(log_message)
-                logger.info(log_message)
-
-        log_message = ("Avg_PSNR:{:.4f} || Avg_SSIM:{:.4f}".format(psnr_meter.get_avg_now(), ssim_meter.get_avg_now()))
-        print(log_message)
-        logger.info(log_message)
-    log_message = ("Avg_PSNR:{:.4f} || Avg_SSIM:{:.4f}".format(psnr_meter.get_avg_all(), ssim_meter.get_avg_all()))
-    print(log_message)
-    logger.info(log_message)
+    # print log message for this epoch
+    log_msg_dict = test_recoder.get_avg_all()
+    log_message = ("Validset | Time {:.4f} | PSNR {:.4f} | SSIM {:.4f}".format(
+        log_msg_dict['time'], log_msg_dict['psnr'], log_msg_dict['ssim']))
+    logger.print_log(log_message)
+    logger.img_logger(save_img_list, 1)
 
 
+if __name__ == '__main__':
+    args = parser.parse_args()
+    with open(args.opt, mode='r') as f:
+        opt = yaml.load(f, Loader=yaml.FullLoader)
+    print("BEGIN!")
+    # set device
+    args.cuda = torch.cuda.is_available() and opt['gpu'] >= 0
+    device = torch.device('cuda:' + str(opt['gpu']) if args.cuda else 'cpu')
+    opt['device'] = device
+    torch.cuda.set_device(device)
 
+    # mkdir for experiment
+    args.save = opt['save_path'] + "/" + opt['name']
+    if os.path.exists(args.save):
+        args.save += str(datetime.datetime.now())[0:19].replace(' ', '_').replace(':', '_')
+    makedirs(args.save)
+    makedirs(join(args.save, "generate"))
 
+    # load checkpoint if exists
+    model = SR_CyGen(opt).to(device)
+    print("load Model：" + opt['load_path'])
+    model_checkpoint = torch.load(opt['load_path'], map_location=device)
+    model.load_state_dict(model_checkpoint['model'])
 
+    # set logger
+    logger = MessageLogger(opt, args)
+    logger.print_log("Log File successfully create in:" + args.save)
+    logger.print_log(opt)
+    logger.print_log(args)
+    copyfile(args.opt, args.save + "/options.yml")
+
+    test_sets = [x for x in sorted(os.listdir(opt['datasets']['dataroot'])) if is_hdf5_file(x)]
+    test_recoder = MessageRecoder(dict().fromkeys(('time', 'psnr', 'ssim')))
+
+    test_pipeline(test_sets=test_sets, model=model, test_recoder=test_recoder, logger=logger, args=args, opt=opt)
 
 

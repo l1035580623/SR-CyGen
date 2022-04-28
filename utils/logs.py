@@ -1,6 +1,8 @@
 import logging
 import os
 from os.path import join
+
+import cv2
 import wandb
 
 
