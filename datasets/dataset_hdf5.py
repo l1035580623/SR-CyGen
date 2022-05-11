@@ -34,7 +34,7 @@ class DataSet_HDF5(data.Dataset):
             LR_img = np.flip(LR_img, 1)
             SR_img = np.flip(SR_img, 1)
 
-        LR_img = cv2.resize(LR_img, (256, 256), interpolation=cv2.INTER_CUBIC)
+        # LR_img = cv2.resize(LR_img, (256, 256), interpolation=cv2.INTER_CUBIC)
 
         LR_img = LR_img.transpose((2, 0, 1))
         SR_img = SR_img.transpose((2, 0, 1))

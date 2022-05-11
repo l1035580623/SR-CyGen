@@ -1,0 +1,38 @@
+# general settings
+name: test_SR_CyGen_0001_demo_test
+save_path: C:/MyCode/code for BS/SR-CyGen/SR-CyGen/expm
+load_path: C:/MyCode/code for BS/SR-CyGen/SR-CyGen/checkpoints/SR_CyGen_epoch_026.pkl
+gpu: 0
+batch_size: 1
+
+# dataset and data loader settings
+datasets:
+  name: MyDataSet-ITCVD
+  dataroot: C:/MyDocuments/Dataset_SR/testset
+
+# network structures
+network:
+  dim_z: 128
+  n_RRDB: 8
+  w_mse: 1.
+  w_cm_1: 0.1
+  w_cm_2: 0.1
+  cmtype: jacnorm_x
+  pxtype: nllhmarg
+
+# test settings
+test:
+  save_img: true
+  save_num: 30
+  save_type: contrast
+  generate_n_1: 1
+  generate_n_2: 1
+
+# logging settings
+logger:
+  print_freq: 100
+  use_tb_logger: true
+  wandb:
+    project: ~
+    resume_id: ~
+

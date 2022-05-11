@@ -5,9 +5,9 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.autograd import Variable
-from base_networks import DFFBlock, UBPBlock, DBPBlock
+from models.base_networks import UBPBlock, DBPBlock
 from arch import flows
-import cygen
+import models.cygen as cygen
 import time
 
 # 将各元素变成常量
@@ -335,12 +335,12 @@ class Decoder(nn.Module):
 
 
 class SR_CyGen(nn.Module):
-    def __init__(self, args):
+    def __init__(self, opt):
         super(SR_CyGen, self).__init__()
 
-        self.dim_z = args.dim_z
-        self.batchSize = args.batch_size
-        self.device = torch.device('cuda:' + str(args.gpu) if args.gpu >= 0 and args.cuda else 'cpu')
+        self.dim_z = opt['network']['dim_z']
+        self.batchSize = opt['batch_size']
+        self.device = opt['device']
 
         self.basicEncoder = BasicEncoder(dim_z=self.dim_z)
         self.flowEncoder = FlowEncoder(dim_z=self.dim_z)
@@ -349,8 +349,8 @@ class SR_CyGen(nn.Module):
         self.LR = None
         self.LR_fmList = None
         self.SR_predict = None
-        self.w_cm = args.w_cm
-        self.w_px = args.w_px
+        self.w_cm = opt['network']['w_cm_1']
+        self.w_px = opt['network']['w_mse']
 
         self.x_gen_stepsize = 1e-3
         self.z_gen_stepsize = 1e-4
@@ -359,13 +359,12 @@ class SR_CyGen(nn.Module):
         self.x_gen_freeze = None
         self.z_gen_freeze = None
 
-        self.frame = cygen.CyGen_FlowqNoInv(args.cmtype, args.pxtype,
+        self.frame = cygen.CyGen_FlowqNoInv(opt['network']['cmtype'], opt['network']['pxtype'],
                 self.eval_logp,
                 self.draw_q0,
                 lambda x, eps: self.eval_z1eps_logqt(x, eps, eval_jac=True),
-                self.eval_z1eps,
-                args.w_cm, args.w_px,
-                args.n_mc_cm, args.n_mc_px)
+                self.eval_z1eps
+                )
 
         # self.start_time = 0.0
 

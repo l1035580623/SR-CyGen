@@ -1,4 +1,6 @@
 import os
+import numpy as np
+import cv2
 import torch
 from skimage.metrics import structural_similarity as ssim_calc
 from skimage.metrics import peak_signal_noise_ratio as psnr_calc
@@ -19,6 +21,13 @@ def tensor2img(tensor):
     tensor = tensor * 255.0
     tensor = tensor.astype("int")
     return tensor
+
+
+def bicubic(img, upscale=4.0):
+    img = img.astype(np.float32)
+    img = cv2.resize(img, (int(img.shape[0] * upscale), int(img.shape[1] * upscale)), interpolation=cv2.INTER_CUBIC)
+    img = img.astype("int")
+    return img
 
 
 def setup_seed(seed):

@@ -76,35 +76,6 @@ class DeconvBlock(torch.nn.Module):
             return out
 
 
-# 基于反投影的特征融合块
-class DFFBlock(torch.nn.Module):
-    def __init__(self, num_filter, num_ft, kernel_size=4, stride=2, padding=1, bias=True, activation='prelu', norm=None):
-        super(DFFBlock, self).__init__()
-        self.num_ft = num_ft - 1
-        self.up_convs = nn.ModuleList()
-        self.down_convs = nn.ModuleList()
-        for i in range(self.num_ft):
-            self.up_convs.append(
-                DeconvBlock(num_filter//(2**i), num_filter//(2**(i+1)), kernel_size, stride, padding, bias, activation)
-            )
-            self.down_convs.append(
-                ConvBlock(num_filter//(2**(i+1)), num_filter//(2**i), kernel_size, stride, padding, bias, activation)
-            )
-
-    def forward(self, ft_l, ft_h_list):
-        ft_fusion = ft_l
-        for i in range(len(ft_h_list)):
-            ft = ft_fusion
-            for j in range(self.num_ft - i):
-                ft = self.up_convs[j](ft)
-            ft = ft - ft_h_list[i]
-            for j in range(self.num_ft - i):
-                ft = self.down_convs[self.num_ft - i - j - 1](ft)
-            ft_fusion = ft_fusion + ft
-
-        return ft_fusion
-
-
 # 基于反投影的上采样模块
 class UBPBlock(torch.nn.Module):
     def __init__(self, num_filter, kernel_size=6, stride=2, padding=2, bias=True, activation='prelu', norm=None):
@@ -141,3 +112,46 @@ class DBPBlock(torch.nn.Module):
         fm2 = self.up_conv(fm1) - self.conv1(x)
         fm3 = self.down_conv2(fm2) + self.conv2(fm1)
         return fm3
+
+
+def make_layer(block, n_layers):
+    layers = []
+    for _ in range(n_layers):
+        layers.append(block())
+    return nn.Sequential(*layers)
+
+
+class ResidualDenseBlock_5C(nn.Module):
+    def __init__(self, nf=64, gc=32, bias=True):
+        super(ResidualDenseBlock_5C, self).__init__()
+        # gc: growth channel, i.e. intermediate channels
+        self.conv1 = nn.Conv2d(nf, gc, 3, 1, 1, bias=bias)
+        self.conv2 = nn.Conv2d(nf + gc, gc, 3, 1, 1, bias=bias)
+        self.conv3 = nn.Conv2d(nf + 2 * gc, gc, 3, 1, 1, bias=bias)
+        self.conv4 = nn.Conv2d(nf + 3 * gc, gc, 3, 1, 1, bias=bias)
+        self.conv5 = nn.Conv2d(nf + 4 * gc, nf, 3, 1, 1, bias=bias)
+        self.lrelu = nn.LeakyReLU(negative_slope=0.2, inplace=True)
+
+    def forward(self, x):
+        x1 = self.lrelu(self.conv1(x))
+        x2 = self.lrelu(self.conv2(torch.cat((x, x1), 1)))
+        x3 = self.lrelu(self.conv3(torch.cat((x, x1, x2), 1)))
+        x4 = self.lrelu(self.conv4(torch.cat((x, x1, x2, x3), 1)))
+        x5 = self.conv5(torch.cat((x, x1, x2, x3, x4), 1))
+        return x5 * 0.2 + x
+
+
+class RRDB(nn.Module):
+    '''Residual in Residual Dense Block'''
+
+    def __init__(self, nf, gc=32):
+        super(RRDB, self).__init__()
+        self.RDB1 = ResidualDenseBlock_5C(nf, gc)
+        self.RDB2 = ResidualDenseBlock_5C(nf, gc)
+        self.RDB3 = ResidualDenseBlock_5C(nf, gc)
+
+    def forward(self, x):
+        out = self.RDB1(x)
+        out = self.RDB2(out)
+        out = self.RDB3(out)
+        return out * 0.2 + x

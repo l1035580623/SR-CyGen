@@ -1,14 +1,14 @@
 import math
-from functools import reduce
+from functools import reduce, partial
 from operator import __mul__
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.autograd import Variable
-from base_networks import DFFBlock, UBPBlock, DBPBlock
+from models.base_networks import UBPBlock, DBPBlock, make_layer, RRDB
 from arch import flows
-import cygen
-import time
+import models.cygen as cygen
+
 
 # 将各元素变成常量
 def tensorify(device=None, *args) -> tuple:
@@ -56,54 +56,70 @@ class ResidualBlock(nn.Module):
         return out
 
 
-class BasicEncoder(nn.Module):
-    def __init__(self):
-        super(BasicEncoder, self).__init__()
+class LREncoder(nn.Module):
+    def __init__(self, n_RRDB=8):
+        super(LREncoder, self).__init__()
+        RRDB_block_f = partial(RRDB, nf=32, gc=32)
+        self.conv_input = nn.Sequential(
+            nn.Conv2d(3, 32, 3, 1, 1),
+            nn.PReLU(),
+            nn.Conv2d(32, 32, 1, 1, 0)
+        )
+        self.RRDB_trunk = make_layer(RRDB_block_f, n_RRDB)
+        self.trunk_conv = nn.Conv2d(32, 32, 3, 1, 1)
 
-        self.conv_input_LR = nn.Conv2d(3, 16, 5, 1, 2)
-        self.conv_input_HR = nn.Conv2d(3, 16, 5, 1, 2)
+    def forward(self, x):
+        fm = self.conv_input(x)
+        trunk = self.trunk_conv(self.RRDB_trunk(fm))
+        fm = fm + trunk
+        return fm
 
-        self.down1_LR = DBPBlock(16)
-        self.down2_LR = DBPBlock(32)
 
-        self.down1_HR = DBPBlock(16)
-        self.down2_HR = DBPBlock(32)
+class HREncoder(nn.Module):
+    def __init__(self, n_RRDB=8):
+        super(HREncoder, self).__init__()
+        RRDB_block_f = partial(RRDB, nf=32, gc=32)
 
-        self.fusion1 = nn.Conv2d(16, 16, 1, 1, 0)
-        self.fusion2 = nn.Conv2d(32, 32, 1, 1, 0)
-        self.fusion3 = nn.Conv2d(64, 64, 1, 1, 0)
+        self.conv_input = nn.Sequential(
+            nn.Conv2d(3, 32, 3, 1, 1),
+            nn.PReLU(),
+            nn.Conv2d(32, 32, 1, 1, 0)
+        )
+        self.down1 = nn.Sequential(
+            DBPBlock(32),
+            nn.Conv2d(64, 32, 1, 1, 0)
+        )
+        self.down2 = nn.Sequential(
+            DBPBlock(32),
+            nn.Conv2d(64, 32, 1, 1, 0)
+        )
+        self.RRDB_trunk = make_layer(RRDB_block_f, n_RRDB)
+        self.trunk_conv = nn.Conv2d(32, 32, 3, 1, 1)
 
-    def forward(self, LR, HR):
-        fm1x_LR = self.conv_input_LR(LR)
-        fm2x_LR = self.down1_LR(fm1x_LR)
-        fm4x_LR = self.down2_LR(fm2x_LR)
+    def forward(self, x):
+        fm_4x = self.conv_input(x)
+        fm_2x = self.down1(fm_4x)
+        fm_1x = self.down2(fm_2x)
 
-        fm1x_HR = self.conv_input_HR(HR) - self.fusion1(fm1x_LR)
-        fm2x_HR = self.down1_HR(fm1x_HR) - self.fusion2(fm2x_LR)
-        fm4x_HR = self.down2_HR(fm2x_HR) - self.fusion3(fm4x_LR)
-
-        return fm4x_HR, [fm1x_LR, fm2x_LR, fm4x_LR]
+        trunk = self.trunk_conv(self.RRDB_trunk(fm_1x))
+        fm = fm_1x + trunk
+        return fm
 
 
 class ResEncoder(nn.Module):
     def __init__(self, dim_z=128):
         super(ResEncoder, self).__init__()
-        self.conv_output = nn.Sequential(
-            ResidualBlock(64),
-            nn.Conv2d(64, 32, 3, 2, 1),
-            ResidualBlock(32)
-        )
-
-        self.pool_size = nn.Sequential(
-            nn.MaxPool2d(4, 4),
-            nn.PReLU()
-        )
-        # self.pool_channel = nn.Conv2d(64, 32, 1, 1, 0)
-
-        self.fc = nn.Sequential(
-            nn.Linear(2048, 1024),
+        self.conv_res = nn.Sequential(
+            nn.Conv2d(32, 32, 3, 2, 1),
             nn.PReLU(),
-            nn.Linear(1024, 512)
+            nn.Conv2d(32, 16, 1, 1, 0),
+            nn.Conv2d(16, 16, 3, 2, 1),
+            nn.PReLU(),
+            nn.Conv2d(16, 8, 1, 1, 0)
+        )
+        self.fc = nn.Sequential(
+            nn.Linear(2048, 512),
+            nn.PReLU()
         )
         self.fc_mean = nn.Linear(512, dim_z)
         self.fc_var = nn.Sequential(
@@ -111,14 +127,10 @@ class ResEncoder(nn.Module):
             nn.Softplus()
         )
 
-    def forward(self, fm4x_HR):
-        fm_output = self.conv_output(fm4x_HR)
-        fm_pool_size = self.pool_size(fm_output)
-        # fm_pool_channel = self.pool_channel(fm_pool_size)
-
-        # fm_resize = fm_pool_channel.view(fm_pool_channel.shape[0], -1)
-        fm_resize = fm_pool_size.view(fm_pool_size.shape[0], -1)
-        h = self.fc(fm_resize)
+    def forward(self, x):
+        fm_res = self.conv_res(x)
+        fm_vec = fm_res.view(fm_res.shape[0], -1)
+        h = self.fc(fm_vec)
         z_mean = self.fc_mean(h)
         z_var = self.fc_var(h)
 
@@ -305,63 +317,72 @@ class ResDecoder(nn.Module):
             nn.Linear(512, 2048)
         )
 
-        self.upConv0 = nn.Sequential(
-            nn.ConvTranspose2d(32, 32, 6, 2, 2),
-            ResidualBlock(32),
-            nn.ConvTranspose2d(32, 64, 6, 2, 2),
-            ResidualBlock(64),
-            nn.ConvTranspose2d(64, 64, 6, 2, 2, bias=False)
+        self.conv_res = nn.Sequential(
+            nn.ConvTranspose2d(8, 8, 6, 2, 2),
+            nn.PReLU(),
+            nn.Conv2d(8, 16, 1, 1, 0),
+            nn.ConvTranspose2d(16, 16, 6, 2, 2),
+            nn.PReLU(),
+            nn.Conv2d(16, 32, 1, 1, 0)
         )
 
     def forward(self, z):
-        fm_input = self.fc(z)
-        fm_resize = fm_input.view(z.shape[0], 32, 8, 8)
+        fm_vec = self.fc(z)
+        fm_res = fm_vec.view(z.shape[0], 8, 16, 16)
 
-        fm_res = self.upConv0(fm_resize)
+        fm_res = self.conv_res(fm_res)
         return fm_res
 
 
 class Decoder(nn.Module):
     def __init__(self):
         super(Decoder, self).__init__()
-        self.upConv1 = UBPBlock(64)
-        self.upConv2 = UBPBlock(32)
+        self.up1 = nn.Sequential(
+            UBPBlock(32),
+            nn.Conv2d(16, 32, 1, 1, 0)
+        )
 
-        self.fusion1 = nn.Conv2d(16, 16, 1, 1, 0)
-        self.fusion2 = nn.Conv2d(32, 32, 1, 1, 0)
-        self.fusion3 = nn.Conv2d(64, 64, 1, 1, 0)
+        self.up2 = nn.Sequential(
+            UBPBlock(32),
+            nn.Conv2d(16, 32, 1, 1, 0)
+        )
 
-        self.conv_output = nn.Conv2d(16, 3, 5, 1, 2)
+        self.conv_output = nn.Sequential(
+            nn.Conv2d(32, 32, 3, 1, 1),
+            nn.PReLU(),
+            nn.Conv2d(32, 3, 3, 1, 1)
+        )
 
-    def forward(self, fm_res, LR_fmList):
-        fm4x = fm_res + self.fusion3(LR_fmList[2])
-        fm4x = fm4x * 0.0
-        fm2x = self.upConv1(fm4x) + self.fusion2(LR_fmList[1])
-        fm1x = self.upConv2(fm2x) + self.fusion1(LR_fmList[0])
+    def forward(self, x):
+        fm_2x = self.up1(x)
+        fm_4x = self.up2(fm_2x)
 
-        out = self.conv_output(fm1x)
+        out = self.conv_output(fm_4x)
         return out
 
 
 class SR_CyGen(nn.Module):
-    def __init__(self, args):
+    def __init__(self, opt):
         super(SR_CyGen, self).__init__()
 
-        self.dim_z = args.dim_z
-        self.batchSize = args.batch_size
-        self.device = torch.device('cuda:' + str(args.gpu) if args.gpu >= 0 and args.cuda else 'cpu')
+        self.dim_z = opt['network']['dim_z']
+        self.n_RRDB = opt['network']['n_RRDB']
+        self.batchSize = opt['batch_size']
+        self.device = opt['device']
 
-        self.basicEncoder = BasicEncoder()
+        self.encoder_HR = HREncoder(n_RRDB=self.n_RRDB)
+        self.encoder_LR = LREncoder(n_RRDB=self.n_RRDB)
         self.resEncoder = ResEncoder(dim_z=self.dim_z)
         self.flowEncoder = FlowEncoder(dim_z=self.dim_z)
         self.resDecoder = ResDecoder(dim_z=self.dim_z)
         self.decoder = Decoder()
 
         self.LR = None
-        self.LR_fmList = None
+        self.fm_LR = None
         self.fm_res_out = None
-        self.w_cm = args.w_cm
-        self.w_px = args.w_px
+        self.w_mse = opt['network']['w_mse']
+        self.w_cm_1 = opt['network']['w_cm_1']
+        self.w_cm_2 = opt['network']['w_cm_2']
 
         self.x_gen_stepsize = 1e-3
         self.z_gen_stepsize = 1e-4
@@ -370,33 +391,35 @@ class SR_CyGen(nn.Module):
         self.x_gen_freeze = None
         self.z_gen_freeze = None
 
-        self.frame = cygen.CyGen_FlowqNoInv(args.cmtype, args.pxtype,
+        self.frame = cygen.CyGen_FlowqNoInv(opt['network']['cmtype'], opt['network']['pxtype'],
                 self.eval_logp,
                 self.draw_q0,
                 lambda x, eps: self.eval_z1eps_logqt(x, eps, eval_jac=True),
                 self.eval_z1eps,
-                args.w_cm, args.w_px,
-                args.n_mc_cm, args.n_mc_px)
+                )
 
-        # self.start_time = 0.0
-
-    def draw_q0(self, batchSize):
-        eps = torch.randn((batchSize, self.dim_z), device=self.device)
+    def draw_q0(self, batch_size):
+        eps = torch.randn((batch_size, self.dim_z), device=self.device)
         eps.data.clamp_(-100.0, 100.0)
         return eps
 
+    def generate_noise(self, x):
+        with torch.no_grad():
+            std = torch.std(x)
+        noise = torch.randn(x.shape) * std
+        return noise
+
     def setLR(self, LR):
         self.LR = LR
+        self.fm_LR = self.encoder_LR(self.LR)
 
-    def eval_z1eps_logqt(self, fm_res_in, eps, eval_jac=False):
-        # fm_res_in, self.LR_fmList = self.basicEncoder(self.LR, SR)
-        h, z_mean, z_var = self.resEncoder(fm_res_in)
+    def eval_z1eps_logqt(self, fm_res, eps, eval_jac=False):
+        h, z_mean, z_var = self.resEncoder(fm_res)
         z, logp, jaceps_z = self.flowEncoder.eval_z1eps_logqt(h, z_mean, z_var, eps, eval_jac)
         return z, logp, jaceps_z
 
-    def eval_z1eps(self, fm_res_in, eps):
-        # self.fm_res_in, self.LR_fmList = self.basicEncoder(self.LR, SR)
-        h, z_mean, z_var = self.resEncoder(fm_res_in)
+    def eval_z1eps(self, fm_res, eps):
+        h, z_mean, z_var = self.resEncoder(fm_res)
         return self.flowEncoder.eval_z1eps(h, z_mean, z_var, eps)
 
     def eval_logp(self, fm_res_in, z):
@@ -425,68 +448,65 @@ class SR_CyGen(nn.Module):
         self.fm_res_out = self.resDecoder(z)
         return self.fm_res_out
 
-    def getlosses(self, LR, SR):
-        # self.start_time = time.time()
-
+    def getlosses(self, LR, HR):
         self.setLR(LR)
-        fm_res_in, self.LR_fmList = self.basicEncoder(self.LR, SR)
+        fm_HR = self.encoder_HR(HR)
+        fm_res_in = fm_HR - self.fm_LR
 
-        cm_loss = self.frame.get_cmloss(fm_res_in)
-        MSE_loss_2 = F.mse_loss(fm_res_in, self.fm_res_out)
+        cm_loss_1 = self.frame.get_cmloss(fm_res_in)
+        cm_loss_2 = F.mse_loss(fm_res_in, self.fm_res_out)
         # with torch.no_grad():
         #     fm_avg = torch.mean(torch.pow(fm_res_in, 2))
         fm_avg = torch.mean(torch.pow(fm_res_in, 2))
-        MSE_loss_2 = MSE_loss_2 / fm_avg
-        print(fm_avg.item(), MSE_loss_2.item())
+        cm_loss_2 = cm_loss_2 / fm_avg
+        # print(fm_avg.item(), cm_loss_2.item())
 
-        SR_predict = self.decoder(self.fm_res_out, self.LR_fmList)
+        fm_SR = self.fm_res_out + self.fm_LR
+        SR_predict = self.decoder(fm_SR)
 
-        MSE_loss = F.mse_loss(SR_predict, SR)
-        VGG_loss = torch.tensor(0.0, device=self.device)
-        loss = self.w_cm * cm_loss + self.w_px * MSE_loss + 0.2 * MSE_loss_2
-        return [loss, cm_loss, MSE_loss, VGG_loss]
+        MSE_loss = F.mse_loss(SR_predict, HR)
+        loss = self.w_mse * MSE_loss + self.w_cm_1 * cm_loss_1 + self.w_cm_2 * cm_loss_2
+        # print("{:.4f} | {:.4f} | {:.6f} | {:.6f}".format(loss.item(), MSE_loss.item(), cm_loss_1.item(), cm_loss_2.item()))
+        return [loss, MSE_loss, cm_loss_1, cm_loss_2]
 
-    def getlosses_noCyGen(self, LR, SR):
-        self.setLR(LR)
-        eps = self.draw_q0(LR.shape[0])
-        z = self.eval_z1eps(SR, eps)
-        x = self.draw_p(z)
-        MSE_loss = F.mse_loss(self.SR_predict, SR)
-        cm_loss = torch.tensor(0.0, device=self.device)
-        VGG_loss = torch.tensor(0.0, device=self.device)
-        loss = self.w_cm * cm_loss + self.w_px * MSE_loss
-        return [loss, cm_loss, MSE_loss, VGG_loss]
+    def get_loss_noCyGen(self, LR, HR):
+        SR_pred = self.forward(LR, HR)
+        loss = F.mse_loss(SR_pred, HR)
+        return [loss, loss, torch.tensor(0.0), torch.tensor(0.0)]
 
-    def generate(self, gentype, LR, n_iter1=6, n_iter2=10):
+    def generate(self, LR, n_iter1=6, n_iter2=10):
         result = []
         self.setLR(LR)
+        LR_resize = F.interpolate(LR, scale_factor=4.0, mode='bicubic')
+        fm_HR = self.encoder_HR(LR_resize)
+        fm_res_in = fm_HR - self.fm_LR
         zp = self.draw_q0(LR.shape[0])
-        fm_res_in, self.LR_fmList = self.basicEncoder(LR, LR)
-        for i in range(n_iter1):
-            if gentype == "gibbs":
-                model_samples_ori_z = self.frame.generate("gibbs", self.draw_p, n_iter2, z0=zp)
-            elif gentype == "langv-x":
-                model_samples_ori_z = self.frame.generate("langv-x", self.draw_p, n_iter2, z0=zp,
-                                                          stepsize=self.x_gen_stepsize,
-                                                          anneal=self.x_gen_anneal, freeze=self.x_gen_freeze,
-                                                          x_range=[0., 1.])
-            elif gentype == "langv-z":
-                model_samples_ori_z = self.frame.generate("langv-z", self.draw_p, n_iter2, z0=zp,
-                                                          stepsize=self.z_gen_stepsize,
-                                                          anneal=self.z_gen_anneal, freeze=self.z_gen_freeze)
-            fm_res_out = model_samples_ori_z[0]
-            SR_pred = self.decoder(fm_res_out, self.LR_fmList)
-            fm_res_in, self.LR_fmList = self.basicEncoder(self.LR, SR_pred)
+        xp = fm_res_in
 
+        for i in range(n_iter1):
+            model_samples_ori_z = self.frame.generate("gibbs", self.draw_p, n_iter2, x0=xp)
+
+            fm_res_out = model_samples_ori_z[0]
+            fm_SR = fm_res_out + self.fm_LR
+            SR_pred = self.decoder(fm_SR)
             result.append(SR_pred)
+
+            fm_HR = self.encoder_HR(SR_pred)
+            fm_res_in = fm_HR - self.fm_LR
+            xp = fm_res_in
 
         return result
 
-    def forward(self, LR, SR):
+    def forward(self, LR, HR):
         self.setLR(LR)
         eps = self.draw_q0(LR.shape[0])
-        z = self.eval_z1eps(SR, eps)
-        x = self.draw_p(z)
-        return x
+
+        fm_HR = self.encoder_HR(HR)
+        fm_res_in = fm_HR + self.fm_LR
+        z = self.eval_z1eps(fm_res_in, eps)
+        fm_res_out = self.draw_p(z)
+        fm_SR = fm_res_out + self.fm_LR
+        SR = self.decoder(fm_SR)
+        return SR
 
 

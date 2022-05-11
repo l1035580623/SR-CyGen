@@ -10,10 +10,10 @@ import random
 import yaml
 import time
 import datetime
-import os
+import cv2
 
 from datasets.dataset_hdf5 import DataSet_HDF5
-from models.SR_cygen_3 import SR_CyGen
+from models.SR_CyGen_RRDB import SR_CyGen
 from utils.utils import *
 from utils.logs import MessageLogger
 
@@ -38,16 +38,20 @@ def train_pipeline(epoch, train_sets, model, train_recoder, logger, optimizer, a
         trainloader = DataLoader(dataset=train_set, batch_size=opt['batch_size'], shuffle=True, num_workers=0)
 
         train_recoder.create()  # create new recoder from this trainloader
-        for k, (LR, SR) in enumerate(trainloader):
+        for k, (LR, HR) in enumerate(trainloader):
             # forward
             start_time = time.time()
             LR = LR.to(device)
-            SR = SR.to(device)
-            loss = model.getlosses(LR, SR)
+            HR = HR.to(device)
+
+            loss = model.get_loss_noCyGen(LR, HR)
 
             # backward
             optimizer.zero_grad()
-            loss[0].backward()
+            if epoch < opt['train']['warm_up']:
+                loss[1].backward()
+            else:
+                loss[0].backward()
             optimizer.step()
 
             # update recoder
@@ -115,7 +119,8 @@ def valid_pipeline(epoch, valid_sets, model, valid_recoder, logger, args, opt):
                 ssim_avg += ssim
                 # save images
                 if save_img_n < opt['logger']['save_img_per_val']:
-                    save_img = np.concatenate((SR_img, SR_pred_img, LR_img), 1)
+                    LR_img_resize = bicubic(LR_img, upscale=4.0)
+                    save_img = np.concatenate((SR_img, SR_pred_img, LR_img_resize), 1)
                     save_img_list.append(save_img)
                     save_img_n += 1
             # update recoder
@@ -161,6 +166,7 @@ if __name__ == '__main__':
 
     # set optimizer
     model = SR_CyGen(opt).to(device)
+    print("Total number of paramerters is {}  ".format(sum(x.numel() for x in model.parameters())))
     resDecoder_params = list(map(id, model.resDecoder.parameters()))
     others_params = filter(lambda p: id(p) not in resDecoder_params, model.parameters())
     optimizer = optim.Adamax([
