@@ -25,6 +25,7 @@ datasets:
 
 # network structures
 network:
+  type: DBPN
   dim_z: 128
   n_RRDB: 4
   w_mse: 1.

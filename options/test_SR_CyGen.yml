@@ -1,7 +1,7 @@
 # general settings
 name: test_SR_CyGen_0001_demo_test
 save_path: C:/MyCode/code for BS/SR-CyGen/SR-CyGen/expm
-load_path: C:/MyCode/code for BS/SR-CyGen/SR-CyGen/checkpoints/SR_CyGen_epoch_026.pkl
+load_path: C:/MyCode/code for BS/SR-CyGen/backup/test_SR_CyGen_DBPN/SR_CyGen_iter_016.pkl
 gpu: 0
 batch_size: 1
 
@@ -12,6 +12,7 @@ datasets:
 
 # network structures
 network:
+  type: DBPN
   dim_z: 128
   n_RRDB: 8
   w_mse: 1.
@@ -23,9 +24,9 @@ network:
 # test settings
 test:
   save_img: true
-  save_num: 30
-  save_type: contrast
-  generate_n_1: 1
+  save_num: 10000
+  save_type: loop
+  generate_n_1: 6
   generate_n_2: 1
 
 # logging settings

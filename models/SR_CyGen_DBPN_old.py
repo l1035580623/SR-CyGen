@@ -10,7 +10,6 @@ from arch import flows
 import models.cygen as cygen
 import time
 
-
 # 将各元素变成常量
 def tensorify(device=None, *args) -> tuple:
     return tuple(arg.to(device) if isinstance(arg, torch.Tensor) else torch.tensor(arg, device=device) for arg in args)
@@ -42,7 +41,7 @@ class ConvLayer(nn.Module):
         return out
 
 
-class ResidualBlock(nn.Module):
+class ResidualBlock(torch.nn.Module):
     def __init__(self, channels):
         super(ResidualBlock, self).__init__()
         self.conv1 = ConvLayer(channels, channels, kernel_size=3, stride=1)
@@ -58,7 +57,7 @@ class ResidualBlock(nn.Module):
 
 
 class BasicEncoder(nn.Module):
-    def __init__(self):
+    def __init__(self, dim_z=128):
         super(BasicEncoder, self).__init__()
 
         self.conv_input_LR = nn.Conv2d(3, 16, 5, 1, 2)
@@ -74,61 +73,6 @@ class BasicEncoder(nn.Module):
         self.fusion2 = nn.Conv2d(32, 32, 1, 1, 0)
         self.fusion3 = nn.Conv2d(64, 64, 1, 1, 0)
 
-    def forward(self, LR, HR):
-        fm1x_LR = self.conv_input_LR(LR)
-        fm2x_LR = self.down1_LR(fm1x_LR)
-        fm4x_LR = self.down2_LR(fm2x_LR)
-
-        fm1x_HR = self.conv_input_HR(HR) - self.fusion1(fm1x_LR)
-        fm2x_HR = self.down1_HR(fm1x_HR) - self.fusion2(fm2x_LR)
-        fm4x_HR = self.down2_HR(fm2x_HR) - self.fusion3(fm4x_LR)
-
-        return fm4x_HR, [fm1x_LR, fm2x_LR, fm4x_LR]
-
-
-class BasicEncoder_ablation(nn.Module):
-    def __init__(self, dim_z=128):
-        super(BasicEncoder_ablation, self).__init__()
-
-        self.conv_input = nn.Conv2d(3, 16, 5, 1, 2)
-        self.down1 = DBPBlock(16)
-        self.down2 = DBPBlock(32)
-
-        self.conv_output = nn.Sequential(
-            ResidualBlock(64),
-            nn.Conv2d(64, 32, 3, 2, 1),
-            ResidualBlock(32)
-        )
-
-        self.pool_size = nn.Sequential(
-            nn.MaxPool2d(4, 4),
-            nn.PReLU()
-        )
-
-        self.fc = nn.Sequential(
-            nn.Linear(2048, 1024),
-            nn.PReLU(),
-            nn.Linear(1024, 512),
-            nn.Linear(512, dim_z)
-        )
-
-    def forward(self, LR):
-        fm1x = self.conv_input(LR)
-        fm2x = self.down1(fm1x)
-        fm4x = self.down2(fm2x)
-
-        fm_output = self.conv_output(fm4x)
-        fm_pool_size = self.pool_size(fm_output)
-
-        fm_resize = fm_pool_size.view(fm_pool_size.shape[0], -1)
-        z = self.fc(fm_resize)
-
-        return z, [fm1x, fm2x, fm4x]
-
-
-class ResEncoder(nn.Module):
-    def __init__(self, dim_z=128):
-        super(ResEncoder, self).__init__()
         self.conv_output = nn.Sequential(
             ResidualBlock(64),
             nn.Conv2d(64, 32, 3, 2, 1),
@@ -152,7 +96,15 @@ class ResEncoder(nn.Module):
             nn.Softplus()
         )
 
-    def forward(self, fm4x_HR):
+    def forward(self, LR, HR):
+        fm1x_LR = self.conv_input_LR(LR)
+        fm2x_LR = self.down1_LR(fm1x_LR)
+        fm4x_LR = self.down2_LR(fm2x_LR)
+
+        fm1x_HR = self.conv_input_HR(HR) - self.fusion1(fm1x_LR)
+        fm2x_HR = self.down1_HR(fm1x_HR) - self.fusion2(fm2x_LR)
+        fm4x_HR = self.down2_HR(fm2x_HR) - self.fusion3(fm4x_LR)
+
         fm_output = self.conv_output(fm4x_HR)
         fm_pool_size = self.pool_size(fm_output)
         # fm_pool_channel = self.pool_channel(fm_pool_size)
@@ -163,7 +115,7 @@ class ResEncoder(nn.Module):
         z_mean = self.fc_mean(h)
         z_var = self.fc_var(h)
 
-        return h, z_mean, z_var
+        return h, z_mean, z_var, [fm1x_LR, fm2x_LR, fm4x_LR]
 
 
 class FlowEncoder(nn.Module):
@@ -336,9 +288,9 @@ class FlowEncoder(nn.Module):
         return z[-1]
 
 
-class ResDecoder(nn.Module):
+class Decoder(nn.Module):
     def __init__(self, dim_z=128):
-        super(ResDecoder, self).__init__()
+        super(Decoder, self).__init__()
 
         self.fc = nn.Sequential(
             nn.Linear(dim_z, 512),
@@ -347,24 +299,13 @@ class ResDecoder(nn.Module):
         )
 
         self.upConv0 = nn.Sequential(
-            nn.ConvTranspose2d(32, 32, 6, 2, 2, bias=False),
+            nn.ConvTranspose2d(32, 32, 6, 2, 2),
             ResidualBlock(32),
-            nn.ConvTranspose2d(32, 64, 6, 2, 2, bias=False),
+            nn.ConvTranspose2d(32, 64, 6, 2, 2),
             ResidualBlock(64),
-            nn.ConvTranspose2d(64, 64, 6, 2, 2, bias=False)
+            nn.ConvTranspose2d(64, 64, 6, 2, 2)
         )
 
-    def forward(self, z):
-        fm_input = self.fc(z)
-        fm_resize = fm_input.view(z.shape[0], 32, 8, 8)
-
-        fm_res = self.upConv0(fm_resize)
-        return fm_res
-
-
-class Decoder(nn.Module):
-    def __init__(self):
-        super(Decoder, self).__init__()
         self.upConv1 = UBPBlock(64)
         self.upConv2 = UBPBlock(32)
 
@@ -374,36 +315,42 @@ class Decoder(nn.Module):
 
         self.conv_output = nn.Conv2d(16, 3, 5, 1, 2)
 
-    def forward(self, fm_res, LR_fmList):
-        fm4x = fm_res + self.fusion3(LR_fmList[2])
+    def forward(self, z, LR_fmList):
+        fm_input = self.fc(z)
+        fm_resize = fm_input.view(z.shape[0], 32, 8, 8)
+
+        z_final = self.upConv0(fm_resize)
+        x_start = self.fusion3(LR_fmList[2])
+
+        fm4x = z_final + x_start
         fm2x = self.upConv1(fm4x) + self.fusion2(LR_fmList[1])
         fm1x = self.upConv2(fm2x) + self.fusion1(LR_fmList[0])
+
+        # fm4x = self.upConv0(fm_resize)
+        # fm2x = self.upConv1(fm4x)
+        # fm1x = self.upConv2(fm2x)
 
         out = self.conv_output(fm1x)
         return out
 
 
-class SR_CyGen_DBPN(nn.Module):
+class SR_CyGen(nn.Module):
     def __init__(self, opt):
-        super(SR_CyGen_DBPN, self).__init__()
+        super(SR_CyGen, self).__init__()
 
         self.dim_z = opt['network']['dim_z']
-        self.n_RRDB = opt['network']['n_RRDB']
         self.batchSize = opt['batch_size']
         self.device = opt['device']
 
-        self.basicEncoder = BasicEncoder()
-        self.resEncoder = ResEncoder(dim_z=self.dim_z)
+        self.basicEncoder = BasicEncoder(dim_z=self.dim_z)
         self.flowEncoder = FlowEncoder(dim_z=self.dim_z)
-        self.resDecoder = ResDecoder(dim_z=self.dim_z)
-        self.decoder = Decoder()
+        self.decoder = Decoder(dim_z=self.dim_z)
 
         self.LR = None
         self.LR_fmList = None
-        self.fm_res_out = None
-        self.w_mse = opt['network']['w_mse']
-        self.w_cm_1 = opt['network']['w_cm_1']
-        self.w_cm_2 = opt['network']['w_cm_2']
+        self.SR_predict = None
+        self.w_cm = opt['network']['w_cm_1']
+        self.w_px = opt['network']['w_mse']
 
         self.x_gen_stepsize = 1e-3
         self.z_gen_stepsize = 1e-4
@@ -416,30 +363,32 @@ class SR_CyGen_DBPN(nn.Module):
                 self.eval_logp,
                 self.draw_q0,
                 lambda x, eps: self.eval_z1eps_logqt(x, eps, eval_jac=True),
-                self.eval_z1eps)
+                self.eval_z1eps
+                )
 
-    def draw_q0(self, batch_size):
-        eps = torch.randn((batch_size, self.dim_z), device=self.device)
+        # self.start_time = 0.0
+
+    def draw_q0(self, batchSize):
+        eps = torch.randn((batchSize, self.dim_z), device=self.device)
         eps.data.clamp_(-100.0, 100.0)
         return eps
 
     def setLR(self, LR):
         self.LR = LR
 
-    def eval_z1eps_logqt(self, fm_res_in, eps, eval_jac=False):
-        # fm_res_in, self.LR_fmList = self.basicEncoder(self.LR, SR)
-        h, z_mean, z_var = self.resEncoder(fm_res_in)
+    def eval_z1eps_logqt(self, SR, eps, eval_jac=False):
+        h, z_mean, z_var, self.LR_fmList = self.basicEncoder(self.LR, SR)
         z, logp, jaceps_z = self.flowEncoder.eval_z1eps_logqt(h, z_mean, z_var, eps, eval_jac)
         return z, logp, jaceps_z
 
-    def eval_z1eps(self, fm_res_in, eps):
-        # self.fm_res_in, self.LR_fmList = self.basicEncoder(self.LR, SR)
-        h, z_mean, z_var = self.resEncoder(fm_res_in)
+    def eval_z1eps(self, SR, eps):
+        h, z_mean, z_var, self.LR_fmList = self.basicEncoder(self.LR, SR)
         return self.flowEncoder.eval_z1eps(h, z_mean, z_var, eps)
 
-    def eval_logp(self, fm_res_in, z):
-        self.fm_res_out = self.resDecoder(z)
-        return self.eval_logp_normal(fm_res_in, self.fm_res_out)
+    def eval_logp(self, SR, z):
+        x = self.decoder(z, self.LR_fmList)
+        self.SR_predict = x
+        return self.eval_logp_normal(SR, x)
 
     def eval_logp_normal(self, x, mean=0., var=1., ndim=1):
         mean = tensorify(x.device, mean)[0]
@@ -460,30 +409,19 @@ class SR_CyGen_DBPN(nn.Module):
         return result
 
     def draw_p(self, z, num=1):
-        self.fm_res_out = self.resDecoder(z)
-        return self.fm_res_out
+        return self.decoder(z, self.LR_fmList)
 
-    def getlosses(self, LR, HR):
+    def getlosses(self, LR, SR):
+        # self.start_time = time.time()
 
         self.setLR(LR)
-        fm_res_in, self.LR_fmList = self.basicEncoder(self.LR, HR)
+        cm_loss = self.frame.get_cmloss(SR)
+        # print("Forward Time2:" + str(time.time() - self.start_time))
+        MSE_loss = F.mse_loss(self.SR_predict, SR)
+        VGG_loss = torch.tensor(0.0, device=self.device)
+        loss = self.w_cm * cm_loss + self.w_px * MSE_loss
+        return [loss, cm_loss, MSE_loss, VGG_loss]
 
-        cm_loss_1 = self.frame.get_cmloss(fm_res_in)
-        cm_loss_2 = F.mse_loss(fm_res_in, self.fm_res_out)
-        # with torch.no_grad():
-        #     fm_avg = torch.mean(torch.pow(fm_res_in, 2))
-        fm_avg = torch.mean(torch.pow(fm_res_in, 2))
-        cm_loss_2 = cm_loss_2 / fm_avg
-        # print(fm_avg.item(), cm_loss_2.item())
-
-        SR_predict = self.decoder(self.fm_res_out, self.LR_fmList)
-
-        MSE_loss = F.mse_loss(SR_predict, HR)
-        loss = self.w_mse * MSE_loss + self.w_cm_1 * cm_loss_1 + self.w_cm_2 * cm_loss_2
-        # print("{:.4f} | {:.4f} | {:.6f} | {:.6f}".format(loss.item(), MSE_loss.item(), cm_loss_1.item(), cm_loss_2.item()))
-        return [loss, MSE_loss, cm_loss_1, cm_loss_2]
-
-    # not used
     def getlosses_noCyGen(self, LR, SR):
         self.setLR(LR)
         eps = self.draw_q0(LR.shape[0])
@@ -499,17 +437,11 @@ class SR_CyGen_DBPN(nn.Module):
         result = []
         self.setLR(LR)
         zp = self.draw_q0(LR.shape[0])
-        fm_res_in, self.LR_fmList = self.basicEncoder(LR, LR)
+        h, z_mean, z_var, self.LR_fmList = self.basicEncoder(LR, LR)
         for i in range(n_iter1):
             model_samples_ori_z = self.frame.generate("gibbs", self.draw_p, n_iter2, z0=zp)
-
-            fm_res_out = model_samples_ori_z[0]
-            SR_pred = self.decoder(fm_res_out, self.LR_fmList)
-            fm_res_in, self.LR_fmList = self.basicEncoder(self.LR, SR_pred)
-            eps = self.draw_q0(LR.shape[0])
-            zp = self.eval_z1eps(fm_res_in, eps)
-
-            result.append(SR_pred)
+            zp = model_samples_ori_z[1]
+            result.append(model_samples_ori_z[0])
 
         return result
 
@@ -520,29 +452,6 @@ class SR_CyGen_DBPN(nn.Module):
         x = self.draw_p(z)
         return x
 
-
-class SR_CyGen_ablation(nn.Module):
-    def __init__(self, opt):
-        super(SR_CyGen_ablation, self).__init__()
-
-        self.dim_z = opt['network']['dim_z']
-        self.batchSize = opt['batch_size']
-        self.device = opt['device']
-
-        self.basicEncoder = BasicEncoder_ablation(dim_z=self.dim_z)
-        self.resDecoder = ResDecoder(dim_z=self.dim_z)
-        self.decoder = Decoder()
-
-    def getlosses(self, LR, HR):
-        SR_pred = self.forward(LR)
-        MSE_loss = F.mse_loss(SR_pred, HR)
-        return [MSE_loss, MSE_loss, torch.tensor(0.0, device=self.device), torch.tensor(0.0, device=self.device)]
-
-    def forward(self, x):
-        z, fm_list = self.basicEncoder(x)
-        fm_res_out = self.resDecoder(z)
-        out = self.decoder(fm_res_out, fm_list)
-        return out
 
 
 

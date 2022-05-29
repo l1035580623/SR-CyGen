@@ -361,9 +361,9 @@ class Decoder(nn.Module):
         return out
 
 
-class SR_CyGen(nn.Module):
+class SR_CyGen_RRDB(nn.Module):
     def __init__(self, opt):
-        super(SR_CyGen, self).__init__()
+        super(SR_CyGen_RRDB, self).__init__()
 
         self.dim_z = opt['network']['dim_z']
         self.n_RRDB = opt['network']['n_RRDB']
@@ -509,4 +509,30 @@ class SR_CyGen(nn.Module):
         SR = self.decoder(fm_SR)
         return SR
 
+
+class SR_CyGen_ablation(nn.Module):
+    def __init__(self, opt):
+        super(SR_CyGen_ablation, self).__init__()
+
+        self.dim_z = opt['network']['dim_z']
+        self.n_RRDB = opt['network']['n_RRDB']
+        self.batchSize = opt['batch_size']
+        self.device = opt['device']
+
+        self.encoder = LREncoder(n_RRDB=self.n_RRDB)
+        self.resEncoder = ResEncoder(dim_z=self.dim_z)
+        self.resDecoder = ResDecoder(dim_z=self.dim_z)
+        self.decoder = Decoder()
+
+    def getlosses(self, LR, HR):
+        SR_pred = self.forward(LR)
+        MSE_loss = F.mse_loss(SR_pred, HR)
+        return [MSE_loss, MSE_loss, torch.tensor(0.0, device=self.device), torch.tensor(0.0, device=self.device)]
+
+    def forward(self, x):
+        fm_in = self.encoder(x)
+        _, z, _ = self.resEncoder(fm_in)
+        fm_out = self.resDecoder(z)
+        out = self.decoder(fm_in + fm_out)
+        return out
 

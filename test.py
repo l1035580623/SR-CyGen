@@ -13,7 +13,10 @@ import datetime
 import cv2
 
 from datasets.dataset_hdf5 import DataSet_HDF5
-from models.SR_cygen_5 import SR_CyGen
+from models.SR_CyGen_DBPN import SR_CyGen_DBPN
+from models.SR_CyGen_RRDB import SR_CyGen_RRDB
+# from models.SR_CyGen_RRDB import SR_CyGen_ablation as SR_CyGen
+# from models.SR_CyGen_DBPN import SR_CyGen_ablation as SR_CyGen_DBPN
 from utils.utils import *
 from utils.logs import MessageLogger
 
@@ -26,13 +29,14 @@ parser.add_argument('--opt', type=str, default="options/test_SR_CyGen.yml")
 def test_pipeline(test_sets, model, test_recoder, logger, args, opt):
     model.eval()
     test_recoder.reset()
+    use_resize = True if opt['network']['type'] == 'DBPN' else False
     save_img_n = 0
     save_img_list = []
 
     for j in range(len(test_sets)):
         # get dataloader
         test_set_path = join(opt['datasets']['dataroot'], test_sets[j])
-        test_set = DataSet_HDF5(test_set_path, use_hflip=False, use_vflip=False)
+        test_set = DataSet_HDF5(test_set_path, use_hflip=False, use_vflip=False, use_resize=use_resize)
         testloader = DataLoader(dataset=test_set, batch_size=opt['batch_size'], shuffle=False, num_workers=0)
 
         test_recoder.create()  # create new recoder for this dataloader
@@ -54,7 +58,8 @@ def test_pipeline(test_sets, model, test_recoder, logger, args, opt):
                 SR_pred_index = SR_pred[-1][i:i + 1, :, :, :]
 
                 LR_img = tensor2img(LR_index)
-                LR_img = bicubic(LR_img, 4.0)
+                if not use_resize:
+                    LR_img = bicubic(LR_img, upscale=4.0)
                 SR_img = tensor2img(SR_index)
                 SR_pred_img = tensor2img(SR_pred_index)
 
@@ -74,6 +79,8 @@ def test_pipeline(test_sets, model, test_recoder, logger, args, opt):
                         img_list = []
                         for l in range(len(SR_pred)):
                             SR_pred_img = tensor2img(SR_pred[l])
+                            psnr, ssim = calc_psnr_ssim(SR_pred_img, SR_img)
+                            print(psnr, ssim)
                             img_list.append(SR_pred_img)
                         save_img = np.concatenate(img_list, 1)
                     else:
@@ -124,18 +131,19 @@ def generate_HR_LR(test_sets, test_recoder, logger):
                 SR_index = SR[i:i + 1, :, :, :]
 
                 LR_img = tensor2img(LR_index)
-                LR_img = bicubic(LR_img, 4.0)
+                # LR_img = bicubic(LR_img, 4.0)
                 SR_img = tensor2img(SR_index)
 
-                psnr, ssim = calc_psnr_ssim(LR_img, SR_img)
+                # psnr, ssim = calc_psnr_ssim(LR_img, SR_img)
+                psnr, ssim = 0, 0
                 psnr_avg += psnr
                 ssim_avg += ssim
                 log_message = ("Time {:.4f} | PSNR {:.4f} | SSIM {:.4f}".format(
                     (end_time - start_time) / n_img, psnr, ssim))
                 logger.print_log(log_message)
                 # save images
-                cv2.imwrite(args.save + "/generate" + "/img_{:04d}_LR.jpg".format(save_img_n), LR_img)
-                cv2.imwrite(args.save + "/generate" + "/img_{:04d}_SR.jpg".format(save_img_n), SR_img)
+                cv2.imwrite(args.save + "/generate" + "/img_{:04d}.jpg".format(save_img_n), SR_img)
+                # cv2.imwrite(args.save + "/generate" + "/img_{:04d}_SR.jpg".format(save_img_n), SR_img)
                 save_img_n += 1
             # update recoder
             test_recoder.update({'time': (end_time - start_time) / n_img,
@@ -173,7 +181,10 @@ if __name__ == '__main__':
     makedirs(join(args.save, "generate"))
 
     # load checkpoint if exists
-    model = SR_CyGen(opt).to(device)
+    if opt['network']['type'] == "RRDB":
+        model = SR_CyGen_RRDB(opt).to(device)
+    else:
+        model = SR_CyGen_DBPN(opt).to(device)
     if opt['load_path'] is not None:
         print("load Model：" + opt['load_path'])
         model_checkpoint = torch.load(opt['load_path'], map_location=device)
@@ -189,6 +200,6 @@ if __name__ == '__main__':
     test_sets = [x for x in sorted(os.listdir(opt['datasets']['dataroot'])) if is_hdf5_file(x)]
     test_recoder = MessageRecoder(dict().fromkeys(('time', 'psnr', 'ssim')))
 
-    # test_pipeline(test_sets=test_sets, model=model, test_recoder=test_recoder, logger=logger, args=args, opt=opt)
-    generate_HR_LR(test_sets=test_sets, test_recoder=test_recoder, logger=logger)
+    test_pipeline(test_sets=test_sets, model=model, test_recoder=test_recoder, logger=logger, args=args, opt=opt)
+    # generate_HR_LR(test_sets=test_sets, test_recoder=test_recoder, logger=logger)
 
